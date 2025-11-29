@@ -1,0 +1,150 @@
+#ifndef UTIL_H
+#define UTIL_H
+
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <sys/time.h>
+#include <climits>
+#include "common.h"
+#include "lang.h"
+
+namespace Util
+{
+
+    static inline std::string &Ltrim(std::string &str, std::string chars)
+    {
+        str.erase(0, str.find_first_not_of(chars));
+        return str;
+    }
+
+    static inline std::string &Rtrim(std::string &str, std::string chars)
+    {
+        str.erase(str.find_last_not_of(chars) + 1);
+        return str;
+    }
+
+    // trim from both ends (in place)
+    static inline std::string &Trim(std::string &str, std::string chars)
+    {
+        return Ltrim(Rtrim(str, chars), chars);
+    }
+
+    static inline void ReplaceAll(std::string &data, std::string toSearch, std::string replaceStr)
+    {
+        size_t pos = data.find(toSearch);
+        while (pos != std::string::npos)
+        {
+            data.replace(pos, toSearch.size(), replaceStr);
+            pos = data.find(toSearch, pos + replaceStr.size());
+        }
+    }
+
+    static inline std::string ToLower(std::string s)
+    {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c)
+                       { return std::tolower(c); });
+        return s;
+    }
+
+    static inline void SetupPreviousFolder(const std::string &path, DirEntry *entry)
+    {
+        memset(entry, 0, sizeof(DirEntry));
+        if (path.length() > 1 && path[path.length() - 1] == '/')
+        {
+            strlcpy(entry->directory, path.c_str(), path.length() - 1);
+        }
+        else
+        {
+            sprintf(entry->directory, "%s", path.c_str());
+        }
+        sprintf(entry->name, "%s", "..");
+        sprintf(entry->path, "%s", entry->directory);
+        sprintf(entry->display_size, "%s", lang_strings[STR_FOLDER]);
+        entry->file_size = 0;
+        entry->isDir = true;
+        entry->selectable = false;
+    }
+
+    static inline std::vector<std::string> Split(const std::string &str, const std::string &delimiter)
+    {
+        std::string text = std::string(str);
+        std::vector<std::string> tokens;
+        size_t pos = 0;
+        while ((pos = text.find(delimiter)) != std::string::npos)
+        {
+            if (text.substr(0, pos).length() > 0)
+                tokens.push_back(text.substr(0, pos));
+            text.erase(0, pos + delimiter.length());
+        }
+        if (text.length() > 0)
+        {
+            tokens.push_back(text);
+        }
+
+        return tokens;
+    }
+
+    static inline bool EndsWith(std::string const &value, std::string const &ending)
+    {
+        if (ending.size() > value.size())
+            return false;
+        return std::equal(ending.rbegin(), ending.rend(), value.rbegin());
+    }
+
+    static uint64_t GetTick()
+    {
+        static struct timeval tick;
+        gettimeofday(&tick, NULL);
+        return tick.tv_sec * 1000000 + tick.tv_usec;
+    }
+
+    static inline size_t NthOccurrence(const std::string &str, const std::string &findMe, int nth, size_t start_pos = 0, size_t end_pos = INT_MAX)
+    {
+        size_t prev_pos = std::string::npos;
+        size_t pos = start_pos;
+        int cnt = 0;
+
+        while (cnt != nth)
+        {
+            pos += 1;
+            pos = str.find(findMe, pos);
+            if (pos > end_pos)
+                return prev_pos;
+                
+            if (pos == std::string::npos)
+            {
+                if (cnt == 0)
+                    return std::string::npos;
+                else
+                    break;
+            }
+            prev_pos = pos;
+            cnt++;
+        }
+        return pos;
+    }
+
+    static inline size_t CountOccurrence(const std::string &str, const std::string &findMe, size_t start_pos = 0, size_t end_pos = INT_MAX)
+    {
+        size_t pos = start_pos;
+        int cnt = 0;
+        while (true)
+        {
+            pos += 1;
+            pos = str.find(findMe, pos);
+            if (pos > end_pos)
+                return cnt;
+                
+            if (pos == std::string::npos)
+            {
+                break;
+            }
+            pos += 1;
+            cnt++;
+        }
+        return cnt;
+    }
+}
+#endif
