@@ -54,16 +54,14 @@ This file is for future agents working on the WebDAV / HTTP download path. It ex
     - Opens/creates the part file `basePath/XX` (two‑digit index).
     - Seeks and writes the data chunk.
 
-**Tinfoil compatibility notes**
+**Tinfoil / DBI compatibility notes**
 
-- DBI and some other installers understand this `<game>.nsp/00, 01, …` layout and can install directly from it.
-- Some versions of Tinfoil:
-  - Show the split folder as a title, but
-  - Display the first part as `00000000` and may fail to install from this layout, even though the content is valid.
-- Workarounds for Tinfoil:
-  - Prefer DBI to install large WebDAV‑downloaded games from the split folder, **or**
-  - On exFAT, join the parts on a PC (e.g. `cat 00 01 02 > full.nsp`) and let Tinfoil install the resulting single NSP.
-- Changing the on‑disk layout to a Tinfoil‑specific split scheme would risk breaking DBI compatibility; until a shared, tested format is agreed, the project keeps DBI‑style layout as the primary target.
+- After a split download completes, NeoSFTP calls `fsdevSetConcatenationFileAttribute` on the `<safe_name>.nsp` folder.
+- This marks the directory as a **concatenation file** so Horizon OS treats it as a single large file whose contents are the concatenation of `00`, `01`, … parts.
+- DBI and Tinfoil (and any other tools that use the normal FS APIs) can then see and install the split NSP as if it were a single file, even on FAT32.
+- If you ever see a split folder that still appears as a bunch of raw parts, check that:
+  - The download completed (look for `WEBDAV PERF split-*` logs with the full size).
+  - You’re running a build that sets the concatenation attribute (v1.1.1 or newer).
 
 ### Parallel vs sequential modes
 
@@ -186,6 +184,36 @@ For WebDAV downloads dispatched through the main `remoteclient`, the app now:
 - Leaves partial data on disk so a later retry can resume (split: based on parts in `<safe_name>.nsp/00, 01, …`; non‑split: based on the existing flat file size).
 
 This keeps long queues from stalling on a single transient “Couldn’t connect to server” without changing the resume semantics or data layout.
+
+### FAT32 vs exFAT and >4 GiB files
+
+Important filesystem notes:
+
+- FAT32 cannot store single files larger than 4 GiB (4 294 967 295 bytes). Attempts to write past that limit will fail even if there is free space.
+- exFAT can store large NSPs as a single file without this limit.
+
+How this interacts with NeoSFTP:
+
+- When `[Global] webdav_split_large=0` and `force_fat32=0`:
+  - Large WebDAV downloads (>4 GiB) are written as a single flat NSP.
+  - On **exFAT** this is fine and works well with Tinfoil.
+  - On **FAT32** this will fail around ~3.9–4.0 GiB with log lines like:
+    - `WEBDAV GET parallel write failed ... expected=8388608 written=0`
+    - `WEBDAV GET range write failed ... expected=8388608 written=0`
+- When either `webdav_split_large=1` or `force_fat32=1`:
+  - Large WebDAV downloads are written using the DBI-style split layout (`<name>.nsp/00, 01, …`).
+  - Each part stays below the FAT32 limit, so downloads succeed on FAT32 and DBI can install from the split folder.
+
+Recommended combinations:
+
+- **exFAT SD card + Tinfoil installs**
+  - `force_fat32=0`
+  - `webdav_split_large=0` (single full NSP per game)
+- **FAT32 SD card + DBI/Tinfoil installs**
+  - `force_fat32=1` or `webdav_split_large=1` (split layout + concatenation attribute).
+  - The OS exports the `<name>.nsp` folder as a single logical NSP via the concatenation file mechanism, so DBI and Tinfoil can install it despite the 4 GiB FAT32 limit.
+
+If you see a large NSP repeatedly failing around 4 GiB with write errors, check your SD card format and the `webdav_split_large` / `force_fat32` settings.
 
 ### Program naming & UI text
 

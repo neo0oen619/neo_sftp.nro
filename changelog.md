@@ -23,7 +23,6 @@
   - Documentation updated to use `/switch/neo_sftp/config.ini` as the runtime config path.
 - Known installer behaviour:
   - DBI understands the `<game>.nsp/00, 01, …` split layout and can install large NSPs directly from those folders.
-  - Some versions of Tinfoil may show the split folder as a game but list the first part as `00000000` and fail to install from this layout; in that case, either use DBI or join the parts into a single NSP on a PC for Tinfoil.
 
 ## 2025-12-03 – Multi-file WebDAV & auto-retry
 
@@ -33,8 +32,16 @@
   - Background jobs log failures but don’t show confirm popups; the leader keeps the existing UI prompts and progress bar semantics.
 - Refactored the download helpers so they can work with an explicit `RemoteClient` instance, enabling per-job WebDAV clients in worker threads while preserving the existing behaviour for the main connection.
 - Improved WebDAV failure behaviour on the main connection:
-  - When a WebDAV download fails, the app now auto-retries it up to 6 times with a short delay between attempts before showing any confirm dialog.
+  - When a WebDAV download fails, the app now auto-retries it up to 6 times, spreading a ~20s total wait across those attempts before showing any confirm dialog.
   - This smooths over transient “Couldn’t connect to server” errors (e.g. VPN/proxy hiccups) on long queues without changing resume semantics.
+
+## 1.1.1 – Concatenation splits & installer compatibility
+
+- Marked WebDAV split NSP folders (`<name>.nsp`) as **concatenation files** using `fsdevSetConcatenationFileAttribute`, so Horizon OS sees them as single logical NSPs whose contents are the concatenation of `00`, `01`, … parts.
+- This makes large, split WebDAV downloads installable on FAT32 SD cards by tools like DBI and Tinfoil, matching DBI’s own “archived folder” behaviour for >4 GiB files.
+- Fixed WebDAV `href` decoding to stop converting `+` into spaces in path segments, so filenames like `[B+U393216+16DLC].nsp` resolve correctly.
+- Tweaked WebDAV auto-retry semantics so failed downloads are retried up to 6 times with a ~20s total backoff before showing a confirm prompt, keeping long queues moving through transient network issues.
+- Changed `[Global] webdav_split_large` to default to `0` (full NSP) for exFAT setups while still supporting explicit split mode (`webdav_split_large=1` / `force_fat32=1`) for FAT32 cards.
 - Updated documentation:
   - `README.md` documents `download_parallel_files` alongside `webdav_chunk_mb` and `webdav_parallel`.
   - `webdav_downloads.md` and `wanttodo.md` have been refreshed to describe the implemented WebDAV pipeline and to focus TODOs on cross-protocol support and UI polish.

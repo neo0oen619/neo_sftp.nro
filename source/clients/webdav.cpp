@@ -18,6 +18,7 @@
 #include "util.h"
 #include "windows.h"
 #include "logger.h"
+#include <switch/runtime/devices/fs_dev.h>
 
 static const char *months[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
@@ -962,7 +963,7 @@ int WebDAVClient::Size(const std::string &path, int64_t *size)
             if (!href || !href.first_child())
                 continue;
 
-            std::string resource_path = CHTTPClient::DecodeUrl(href.first_child().value(), true);
+            std::string resource_path = CHTTPClient::DecodeUrl(href.first_child().value(), false);
             auto resource_path_without_sep = resource_path.erase(resource_path.find_last_not_of('/') + 1);
             // Strip any WebDAV base path (eg "/dav") from the beginning,
             // so URLs like "/dav/F:2TB/..." match our logical path
@@ -1098,12 +1099,11 @@ int WebDAVClient::Get(const std::string &outputfile, const std::string &path, ui
     int64_t chunk_size = static_cast<int64_t>(chunk_mb) * 1024 * 1024;
 
     const uint64_t kSplitPartSize = 4294901760ULL; // 4 GiB - 64 KiB
-    // For files larger than 4 GiB, use the DBI-style split layout by
-    // default so downloads succeed even on FAT32 cards. The force_fat32
-    // flag can also be used to force this layout for testing or for
-    // smaller files. Advanced users on exFAT who primarily use Tinfoil
-    // can disable large-file splitting via [Global] webdav_split_large=0
-    // to keep a single flat NSP instead.
+    // For files larger than 4 GiB, use the DBI-style split layout when
+    // either the user explicitly requests it via webdav_split_large=1 or
+    // when we are emulating FAT32 (force_fat32=1). On exFAT, the default
+    // is now to keep a single flat NSP so tools like Tinfoil see a normal
+    // game file instead of a split folder.
     bool need_split = force_fat32 || (webdav_split_large && size > 0xFFFFFFFFLL);
 
     if (need_split)
@@ -1571,6 +1571,17 @@ int WebDAVClient::GetRangedSequentialSplit(const std::string &outputfile,
 
     Logger::Logf("WEBDAV GET split ranged done url=%s code=%ld bytes=%lld",
                  encoded_url.c_str(), last_code, static_cast<long long>(offset_bytes));
+
+    // Mark the split base directory as a concatenation file for the
+    // sequential split path as well so that the OS sees it as a single
+    // logical file.
+    Result cat_rc = fsdevSetConcatenationFileAttribute(outputfile.c_str());
+    if (R_FAILED(cat_rc))
+    {
+        Logger::Logf("WEBDAV GET split-ranged failed to set concatenation attribute path=%s rc=0x%08x",
+                     outputfile.c_str(),
+                     cat_rc);
+    }
     return 1;
 }
 
@@ -1670,6 +1681,19 @@ int WebDAVClient::GetRangedParallelSplit(const std::string &outputfile,
         sprintf(this->response, "%s", lang_strings[STR_FAIL_DOWNLOAD_MSG]);
         Logger::Logf("WEBDAV GET split-parallel produced no data url=%s", encoded_url.c_str());
         return 0;
+    }
+
+    // Mark the split base directory as a concatenation file so that HOS
+    // (and tools like DBI/Tinfoil that use the normal FS APIs) can see
+    // it as a single file whose contents are the concatenation of 00, 01,
+    // ... parts. This mirrors what DBI does when splitting >4 GiB files
+    // on FAT32 via its "archived folder" behaviour.
+    Result cat_rc = fsdevSetConcatenationFileAttribute(outputfile.c_str());
+    if (R_FAILED(cat_rc))
+    {
+        Logger::Logf("WEBDAV GET split-parallel failed to set concatenation attribute path=%s rc=0x%08x",
+                     outputfile.c_str(),
+                     cat_rc);
     }
 
     uint64_t now = Util::GetTick();
@@ -1860,7 +1884,7 @@ std::vector<DirEntry> WebDAVClient::ListDir(const std::string &path)
             if (!href || !href.first_child())
                 continue;
 
-            std::string resource_path = CHTTPClient::DecodeUrl(href.first_child().value(), true);
+            std::string resource_path = CHTTPClient::DecodeUrl(href.first_child().value(), false);
             auto resource_path_without_sep = resource_path.erase(resource_path.find_last_not_of('/') + 1);
             if (!this->base_path.empty() && this->base_path != "/")
             {

@@ -576,7 +576,8 @@ namespace Actions
         if (confirm_state == CONFIRM_YES)
         {
             const int kMaxAutoResumeAttempts = 6;
-            const int64_t kAutoResumeDelayNs = 20000000000ll; // 20 seconds
+            const int64_t kAutoResumeTotalNs = 20000000000ll; // ~20 seconds total across all attempts
+            const int64_t kPerAttemptDelayNs = kAutoResumeTotalNs / kMaxAutoResumeAttempts;
             int auto_attempts = 0;
 
             while (true)
@@ -614,7 +615,7 @@ namespace Actions
                                  src);
 
                     const int slices = 20;
-                    const int64_t slice = kAutoResumeDelayNs / slices;
+                    const int64_t slice = kPerAttemptDelayNs / slices;
                     for (int i = 0; i < slices; ++i)
                     {
                         if (stop_activity)

@@ -107,12 +107,13 @@ namespace CONFIG
             download_parallel_files = 3;
         WriteInt(CONFIG_GLOBAL, CONFIG_DOWNLOAD_PARALLEL_FILES, download_parallel_files);
 
-        // When true (default), large WebDAV downloads (>4 GiB) are written
-        // using the DBI-style split layout so they are safe on FAT32 and
-        // installable by DBI. When false, large files are written as a
-        // single flat file instead (better for Tinfoil on exFAT, but not
-        // FAT32-safe).
-        webdav_split_large = ReadBool(CONFIG_GLOBAL, CONFIG_WEBDAV_SPLIT_LARGE, true);
+        // When true, large WebDAV downloads (>4 GiB) are written using the
+        // DBI-style split layout so they are safe on FAT32 and installable
+        // by DBI. When false (default), large files are written as a single
+        // flat file instead (better for Tinfoil on exFAT, but not
+        // FAT32-safe). Users on FAT32 should either set this to 1 or use
+        // force_fat32=1.
+        webdav_split_large = ReadBool(CONFIG_GLOBAL, CONFIG_WEBDAV_SPLIT_LARGE, false);
         WriteBool(CONFIG_GLOBAL, CONFIG_WEBDAV_SPLIT_LARGE, webdav_split_large);
 
         // When set, treat the SD card as FAT32 for the purposes of large
