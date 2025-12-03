@@ -2,6 +2,8 @@
 
 Goal: make large remote downloads faster and more reliable by fetching multiple chunks of a file concurrently, then stitching them back together on the Switch.
 
+Status (2025‑12‑03): the core per‑file WebDAV chunking + parallelism is implemented and wired to INI options. The remaining ideas here are mostly cross‑protocol or UI polish.
+
 ### High-level idea
 
 - Keep the existing sequential download path as a safe fallback.
@@ -26,13 +28,11 @@ Goal: make large remote downloads faster and more reliable by fetching multiple 
 
 ### Implementation notes (future work)
 
-- WebDAV/HTTP:
-  - Reuse the existing `HTTPClient` but add a "ranged GET" helper that:
-    - Accepts `(path, offset, length, sink)` where `sink` writes into a preallocated buffer or directly into the file at an offset.
-  - Manage workers via a small thread pool (or libcurl multi if we want pure event-driven).
-  - Ensure:
-    - No more than `download_parallel_workers` chunks in flight per file.
-    - Per-connection timeouts and retry backoff (especially on Wi-Fi hiccups).
+- WebDAV/HTTP (mostly done):
+  - Implemented ranged GETs via `GetRangedSequential` / `GetRangedParallel` and their split variants in `WebDAVClient` using `CHTTPClient`.
+  - Managed workers via a small pool of threads, one `CHTTPClient` per worker, coordinated through `WebDAVParallelContext` / `WebDAVParallelSplitContext`.
+  - Enforced a 256 MiB in‑flight window to keep RAM usage bounded, controlled by `[Global] webdav_chunk_mb` and `[Global] webdav_parallel`.
+  - Added per‑chunk retries and, at the file level, automatic retries with backoff before asking the user to confirm.
 
 - Local file writes:
   - Open the destination file once, pre-size it to the full length (when size is known).
@@ -51,5 +51,10 @@ Goal: make large remote downloads faster and more reliable by fetching multiple 
 - Network stacks (VPN/WebDAV/proxies) may rate-limit or dislike too much parallelism:
   - Implementation should detect repeated failures and fall back to sequential mode.
 
-This file is only a design/intent note for now; no behaviour changes are implemented yet.
+### New TODOs after first implementation
 
+- Extend similar multi‑chunk / parallel semantics to SFTP (libssh2 pipelining or multiple handles), with conservative defaults and a separate INI section.
+- Add more UI around multiple active transfers (simple “Transfers” list, per‑file status) while keeping the existing global bar lightweight.
+- Consider per‑site performance presets so aggressive LAN settings don’t leak into slow WAN sites.
+
+This file now tracks *future* pipeline ideas; see `webdav_downloads.md` for the current WebDAV implementation.

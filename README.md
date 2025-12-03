@@ -22,13 +22,14 @@ Think of it as Cyberduck/FileZilla, but trapped in a tiny plastic console and mo
 - **Speed hacks (a bit cursed, but effective)**:
   - Chunked downloads via HTTP `Range` (config: `webdav_chunk_mb`, default 8, clamped 1–32).
   - Optional **parallel range workers per file** (config: `webdav_parallel`, default 10, clamped by code and in‑flight window).
-  - Parallel mode works for both single‑file downloads and split downloads, with a 256 MiB cap on the total in‑flight window (`chunk * parallel`) to avoid out‑of‑memory fun.
+  - Parallel mode works for both single‑file downloads and split downloads, with a 256 MiB cap on the total in‑flight window (`webdav_chunk_mb * webdav_parallel`) to avoid out‑of‑memory fun.
   - Tuned libcurl (HTTP/2 preferred, bigger buffers, TCP_NODELAY, keep‑alives).
   - CPU boost + Wi‑Fi priority on Switch so your downloads get VIP treatment while your battery quietly plots revenge.
   - Auto‑sleep is disabled while the app runs so long transfers don’t get killed by the system sleep timer.
 - **Safer failures & resume**:
   - WebDAV range workers retry transient errors (disconnects, DNS issues) a few times per chunk.
-  - When a WebDAV download still fails, you get a **Confirm** popup showing the real error and can choose to retry/resume instead of the app silently giving up.
+  - If a WebDAV download fails on the main connection, the app now auto‑retries it up to 6 times with a short delay before showing any confirm popup. This smooths over brief “Couldn’t connect to server” blips on long queues.
+  - Once automatic retries are exhausted, you get a **Confirm** popup showing the real error and can choose to retry/resume instead of the app silently giving up.
   - The UI shows how many MiB were actually downloaded for a failed file (`downloaded X/Y MiB` when size is known), and partial data is left on SD so a later retry can resume.
 
 It’s still limited by Switch Wi‑Fi + VPN + reverse proxy + your ISP. We’re fast *for that*, not for physics.
@@ -70,6 +71,8 @@ Key bits:
     Bigger = fewer requests, more RAM, more “hold my beer”.
   - `webdav_parallel=10` – parallel WebDAV workers per file (1–32, effectively clamped by a 256 MiB in‑flight window).  
     More = more connections, more speed *until* your server/tunnel says “nope”.
+  - `download_parallel_files=1` – how many WebDAV files to download at once (1–3).  
+    Each file still uses its own `webdav_parallel` workers, so total connections ≈ `download_parallel_files * webdav_parallel`.
   - `force_fat32=0` – when set to 1, always use split layout (even ≤4 GiB); large files split regardless so they work on FAT32.
 - `[Site N]`
   - `remote_server=` – e.g. `webdavs://unk1server.../dav` or `sftp://host:port`.

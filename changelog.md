@@ -24,3 +24,17 @@
 - Known installer behaviour:
   - DBI understands the `<game>.nsp/00, 01, …` split layout and can install large NSPs directly from those folders.
   - Some versions of Tinfoil may show the split folder as a game but list the first part as `00000000` and fail to install from this layout; in that case, either use DBI or join the parts into a single NSP on a PC for Tinfoil.
+
+## 2025-12-03 – Multi-file WebDAV & auto-retry
+
+- Added a small WebDAV-only download scheduler so multiple files can be downloaded in parallel:
+  - The number of concurrent WebDAV files is controlled by `[Global] download_parallel_files` (clamped 1–3).
+  - Each file still uses the existing per-file WebDAV range pipeline (`webdav_chunk_mb` and `webdav_parallel`), with one “leader” job using the main connection for UI and background jobs using their own `WebDAVClient` instances.
+  - Background jobs log failures but don’t show confirm popups; the leader keeps the existing UI prompts and progress bar semantics.
+- Refactored the download helpers so they can work with an explicit `RemoteClient` instance, enabling per-job WebDAV clients in worker threads while preserving the existing behaviour for the main connection.
+- Improved WebDAV failure behaviour on the main connection:
+  - When a WebDAV download fails, the app now auto-retries it up to 6 times with a short delay between attempts before showing any confirm dialog.
+  - This smooths over transient “Couldn’t connect to server” errors (e.g. VPN/proxy hiccups) on long queues without changing resume semantics.
+- Updated documentation:
+  - `README.md` documents `download_parallel_files` alongside `webdav_chunk_mb` and `webdav_parallel`.
+  - `webdav_downloads.md` and `wanttodo.md` have been refreshed to describe the implemented WebDAV pipeline and to focus TODOs on cross-protocol support and UI polish.

@@ -1098,10 +1098,13 @@ int WebDAVClient::Get(const std::string &outputfile, const std::string &path, ui
     int64_t chunk_size = static_cast<int64_t>(chunk_mb) * 1024 * 1024;
 
     const uint64_t kSplitPartSize = 4294901760ULL; // 4 GiB - 64 KiB
-    // For files larger than 4 GiB, always use the DBI-style split layout
-    // so downloads succeed even on FAT32 cards. The force_fat32 flag can
-    // also be used to force this layout for testing or for smaller files.
-    bool need_split = (size > 0xFFFFFFFFLL) || force_fat32;
+    // For files larger than 4 GiB, use the DBI-style split layout by
+    // default so downloads succeed even on FAT32 cards. The force_fat32
+    // flag can also be used to force this layout for testing or for
+    // smaller files. Advanced users on exFAT who primarily use Tinfoil
+    // can disable large-file splitting via [Global] webdav_split_large=0
+    // to keep a single flat NSP instead.
+    bool need_split = force_fat32 || (webdav_split_large && size > 0xFFFFFFFFLL);
 
     if (need_split)
     {

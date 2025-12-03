@@ -21,6 +21,8 @@ char language[128];
 int max_edit_file_size;
 int webdav_chunk_size_mb;
 int webdav_parallel_connections;
+int download_parallel_files;
+bool webdav_split_large;
 bool force_fat32;
 std::vector<std::string> sites;
 std::map<std::string, RemoteSettings> site_settings;
@@ -92,6 +94,26 @@ namespace CONFIG
         else if (webdav_parallel_connections > 32)
             webdav_parallel_connections = 32;
         WriteInt(CONFIG_GLOBAL, CONFIG_WEBDAV_PARALLEL, webdav_parallel_connections);
+
+        // Maximum number of individual files to download in parallel at the
+        // scheduler level. This is a coarse-grained knob that controls how
+        // many separate WebDAV transfers can be in flight at once on top of
+        // any per-file range parallelism. Keep this small to avoid
+        // overloading the Switch CPU, SD card, or remote server.
+        download_parallel_files = ReadInt(CONFIG_GLOBAL, CONFIG_DOWNLOAD_PARALLEL_FILES, 1);
+        if (download_parallel_files < 1)
+            download_parallel_files = 1;
+        else if (download_parallel_files > 3)
+            download_parallel_files = 3;
+        WriteInt(CONFIG_GLOBAL, CONFIG_DOWNLOAD_PARALLEL_FILES, download_parallel_files);
+
+        // When true (default), large WebDAV downloads (>4 GiB) are written
+        // using the DBI-style split layout so they are safe on FAT32 and
+        // installable by DBI. When false, large files are written as a
+        // single flat file instead (better for Tinfoil on exFAT, but not
+        // FAT32-safe).
+        webdav_split_large = ReadBool(CONFIG_GLOBAL, CONFIG_WEBDAV_SPLIT_LARGE, true);
+        WriteBool(CONFIG_GLOBAL, CONFIG_WEBDAV_SPLIT_LARGE, webdav_split_large);
 
         // When set, treat the SD card as FAT32 for the purposes of large
         // downloads and automatically switch to a split-file layout for

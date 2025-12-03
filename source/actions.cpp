@@ -15,6 +15,37 @@
 
 namespace Actions
 {
+    // Background worker entry point used by the WebDAV parallel
+    // download scheduler. Defined later in this file.
+    static void ParallelDownloadWorkerThread(void *argp);
+
+    namespace
+    {
+        struct ParallelDownloadJob
+        {
+            DirEntry entry;
+            std::string destBase;
+        };
+
+        struct ParallelDownloadWorkerCtx
+        {
+            ParallelDownloadJob job;
+            RemoteSettings settings;
+            int result = 0;
+        };
+
+        static std::string BuildLocalDestForEntry(const DirEntry &entry, const char *baseLocalDir)
+        {
+            if (entry.isDir)
+            {
+                char new_dir[512];
+                sprintf(new_dir, "%s%s%s", baseLocalDir, FS::hasEndSlash(baseLocalDir) ? "" : "/", entry.name);
+                return std::string(new_dir);
+            }
+            return std::string(baseLocalDir);
+        }
+    }
+
     static int FtpCallback(int64_t xfered, void *arg)
     {
         bytes_transfered = xfered;
@@ -491,28 +522,36 @@ namespace Actions
         }
     }
 
-    int DownloadFile(const char *src, const char *dest)
+    static int DownloadFileWithClient(RemoteClient *client, const char *src, const char *dest)
     {
         int ret;
         bytes_transfered = 0;
         prev_tick = Util::GetTick();
+        if (client == nullptr)
+        {
+            return 0;
+        }
+
         // For WebDAV, skip explicit size probes (some proxies misbehave on HEAD/PROPFIND).
-        if (remoteclient->clientType() == CLIENT_TYPE_WEBDAV)
+        if (client->clientType() == CLIENT_TYPE_WEBDAV)
         {
             bytes_to_download = 0;
         }
         else
         {
-            ret = remoteclient->Size(src, &bytes_to_download);
+            ret = client->Size(src, &bytes_to_download);
             if (ret == 0)
             {
-                remoteclient->Quit();
-                snprintf(status_message, 1023, "%s", lang_strings[STR_CONNECTION_CLOSE_ERR_MSG]);
+                client->Quit();
+                if (client == remoteclient)
+                    snprintf(status_message, 1023, "%s", lang_strings[STR_CONNECTION_CLOSE_ERR_MSG]);
                 return ret;
             }
         }
 
-        if (overwrite_type == OVERWRITE_PROMPT && FS::FileExists(dest))
+        const bool interactive = (client == remoteclient);
+
+        if (overwrite_type == OVERWRITE_PROMPT && FS::FileExists(dest) && interactive)
         {
             sprintf(confirm_message, "%s %s?", lang_strings[STR_OVERWRITE], dest);
             confirm_state = CONFIRM_WAIT;
@@ -536,15 +575,20 @@ namespace Actions
 
         if (confirm_state == CONFIRM_YES)
         {
+            const int kMaxAutoResumeAttempts = 6;
+            const int64_t kAutoResumeDelayNs = 20000000000ll; // 20 seconds
+            int auto_attempts = 0;
+
             while (true)
             {
                 prev_tick = Util::GetTick();
-                sprintf(activity_message, "%s %s\n", lang_strings[STR_DOWNLOADING], src);
-                int ok = remoteclient->Get(dest, src);
+                if (interactive)
+                    sprintf(activity_message, "%s %s\n", lang_strings[STR_DOWNLOADING], src);
+                int ok = client->Get(dest, src);
                 if (ok)
                     return 1;
 
-                const char *resp = remoteclient->LastResponse();
+                const char *resp = client->LastResponse();
                 if (resp && strcmp(resp, lang_strings[STR_CANCEL_ACTION_MSG]) == 0)
                 {
                     Logger::Logf("Download cancelled path=%s resp=%s", src, resp);
@@ -554,43 +598,82 @@ namespace Actions
                 Logger::Logf("Download failed path=%s resp=%s", src, resp ? resp : "");
 
                 // For non-WebDAV clients, keep legacy behaviour and fail immediately.
-                if (remoteclient->clientType() != CLIENT_TYPE_WEBDAV)
+                if (client->clientType() != CLIENT_TYPE_WEBDAV || !interactive)
                     return 0;
 
-                // For WebDAV, give the user a chance to resume instead of
-                // auto-failing after internal retries (handled inside the
-                // WebDAV client with backoff). Ask whether to retry or abort.
-                snprintf(confirm_message, 1023, "%s %s\n%s",
-                         lang_strings[STR_FAIL_DOWNLOAD_MSG],
-                         src,
-                         resp ? resp : "");
-                confirm_state = CONFIRM_WAIT;
-                action_to_take = selected_action;
-                activity_inprogess = false;
-                while (confirm_state == CONFIRM_WAIT)
+                // For WebDAV, automatically retry a few times before asking
+                // the user to confirm. This helps smooth over transient
+                // "Couldn't connect to server" blips from VPN / proxy setups
+                // without spamming confirm dialogs.
+                if (interactive && auto_attempts < kMaxAutoResumeAttempts)
                 {
-                    svcSleepThread(100000000ull);
-                }
-                activity_inprogess = true;
-                selected_action = action_to_take;
+                    ++auto_attempts;
+                    Logger::Logf("Download auto-resume attempt %d/%d path=%s",
+                                 auto_attempts,
+                                 kMaxAutoResumeAttempts,
+                                 src);
 
-                if (confirm_state != CONFIRM_YES)
+                    const int slices = 20;
+                    const int64_t slice = kAutoResumeDelayNs / slices;
+                    for (int i = 0; i < slices; ++i)
+                    {
+                        if (stop_activity)
+                        {
+                            Logger::Logf("Download auto-resume cancelled path=%s", src);
+                            return 0;
+                        }
+                        svcSleepThread(slice);
+                    }
+
+                    // Loop back and attempt the download again automatically.
+                    continue;
+                }
+
+                // After automatic retries are exhausted, give the user a
+                // chance to explicitly resume or abort.
+                if (interactive)
                 {
-                    // User chose not to resume; leave partial data on disk so
-                    // a future attempt can resume using WebDAV's range logic.
+                    snprintf(confirm_message, 1023, "%s %s\n%s",
+                             lang_strings[STR_FAIL_DOWNLOAD_MSG],
+                             src,
+                             resp ? resp : "");
+                    confirm_state = CONFIRM_WAIT;
+                    action_to_take = selected_action;
+                    activity_inprogess = false;
+                    while (confirm_state == CONFIRM_WAIT)
+                    {
+                        svcSleepThread(100000000ull);
+                    }
+                    activity_inprogess = true;
+                    selected_action = action_to_take;
+
+                    if (confirm_state != CONFIRM_YES)
+                    {
+                        // User chose not to resume; leave partial data on disk so
+                        // a future attempt can resume using WebDAV's range logic.
+                        return 0;
+                    }
+
+                    // Loop back and attempt to resume the download using the same
+                    // dest/src; WebDAVClient::Get will detect existing partial
+                    // data and only request the missing ranges.
+                }
+                else
+                {
                     return 0;
                 }
-
-                // Loop back and attempt to resume the download using the same
-                // dest/src; WebDAVClient::Get will detect existing partial
-                // data and only request the missing ranges.
             }
         }
 
         return 1;
     }
 
-    int Download(const DirEntry &src, const char *dest)
+    int DownloadFile(const char *src, const char *dest)
+    {
+        return DownloadFileWithClient(remoteclient, src, dest);
+    }
+
+    static int DownloadWithClient(RemoteClient *client, const DirEntry &src, const char *dest)
     {
         if (stop_activity)
             return 1;
@@ -599,7 +682,7 @@ namespace Actions
         if (src.isDir)
         {
             int err;
-            std::vector<DirEntry> entries = remoteclient->ListDir(src.path);
+            std::vector<DirEntry> entries = client->ListDir(src.path);
             FS::MkDirs(dest);
             for (int i = 0; i < entries.size(); i++)
             {
@@ -616,7 +699,7 @@ namespace Actions
                         continue;
 
                     FS::MkDirs(new_path);
-                    ret = Download(entries[i], new_path);
+                    ret = DownloadWithClient(client, entries[i], new_path);
                     if (ret <= 0)
                     {
                         free(new_path);
@@ -625,31 +708,35 @@ namespace Actions
                 }
                 else
                 {
-                    snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DOWNLOADING], entries[i].path);
-                    ret = DownloadFile(entries[i].path, new_path);
+                    if (client == remoteclient)
+                        snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DOWNLOADING], entries[i].path);
+                    ret = DownloadFileWithClient(client, entries[i].path, new_path);
                     if (ret <= 0)
                     {
-                        const char *resp = remoteclient->LastResponse();
-                        if (resp && strcmp(resp, lang_strings[STR_CANCEL_ACTION_MSG]) == 0)
-                            snprintf(status_message, 1023, "%s", resp);
-                        else
+                        if (client == remoteclient)
                         {
-                            double mb = bytes_transfered / 1048576.0;
-                            if (bytes_to_download > 0)
-                            {
-                                double total_mb = bytes_to_download / 1048576.0;
-                                snprintf(status_message, 1023, "%s %s (downloaded %.2f/%.2f MiB)",
-                                         lang_strings[STR_FAIL_DOWNLOAD_MSG],
-                                         entries[i].path,
-                                         mb,
-                                         total_mb);
-                            }
+                            const char *resp = client->LastResponse();
+                            if (resp && strcmp(resp, lang_strings[STR_CANCEL_ACTION_MSG]) == 0)
+                                snprintf(status_message, 1023, "%s", resp);
                             else
                             {
-                                snprintf(status_message, 1023, "%s %s (downloaded %.2f MiB)",
-                                         lang_strings[STR_FAIL_DOWNLOAD_MSG],
-                                         entries[i].path,
-                                         mb);
+                                double mb = bytes_transfered / 1048576.0;
+                                if (bytes_to_download > 0)
+                                {
+                                    double total_mb = bytes_to_download / 1048576.0;
+                                    snprintf(status_message, 1023, "%s %s (downloaded %.2f/%.2f MiB)",
+                                             lang_strings[STR_FAIL_DOWNLOAD_MSG],
+                                             entries[i].path,
+                                             mb,
+                                             total_mb);
+                                }
+                                else
+                                {
+                                    snprintf(status_message, 1023, "%s %s (downloaded %.2f MiB)",
+                                             lang_strings[STR_FAIL_DOWNLOAD_MSG],
+                                             entries[i].path,
+                                             mb);
+                                }
                             }
                         }
                         free(new_path);
@@ -664,32 +751,36 @@ namespace Actions
             int path_length = strlen(dest) + strlen(src.name) + 2;
             char *new_path = malloc(path_length);
             snprintf(new_path, path_length, "%s%s%s", dest, FS::hasEndSlash(dest) ? "" : "/", src.name);
-            snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DOWNLOADING], src.path);
-            ret = DownloadFile(src.path, new_path);
+            if (client == remoteclient)
+                snprintf(activity_message, 1024, "%s %s", lang_strings[STR_DOWNLOADING], src.path);
+            ret = DownloadFileWithClient(client, src.path, new_path);
             if (ret <= 0)
             {
                 free(new_path);
-                const char *resp = remoteclient->LastResponse();
-                if (resp && strcmp(resp, lang_strings[STR_CANCEL_ACTION_MSG]) == 0)
-                    snprintf(status_message, 1023, "%s", resp);
-                else
+                if (client == remoteclient)
                 {
-                    double mb = bytes_transfered / 1048576.0;
-                    if (bytes_to_download > 0)
-                    {
-                        double total_mb = bytes_to_download / 1048576.0;
-                        snprintf(status_message, 1023, "%s %s (downloaded %.2f/%.2f MiB)",
-                                 lang_strings[STR_FAIL_DOWNLOAD_MSG],
-                                 src.path,
-                                 mb,
-                                 total_mb);
-                    }
+                    const char *resp = client->LastResponse();
+                    if (resp && strcmp(resp, lang_strings[STR_CANCEL_ACTION_MSG]) == 0)
+                        snprintf(status_message, 1023, "%s", resp);
                     else
                     {
-                        snprintf(status_message, 1023, "%s %s (downloaded %.2f MiB)",
-                                 lang_strings[STR_FAIL_DOWNLOAD_MSG],
-                                 src.path,
-                                 mb);
+                        double mb = bytes_transfered / 1048576.0;
+                        if (bytes_to_download > 0)
+                        {
+                            double total_mb = bytes_to_download / 1048576.0;
+                            snprintf(status_message, 1023, "%s %s (downloaded %.2f/%.2f MiB)",
+                                     lang_strings[STR_FAIL_DOWNLOAD_MSG],
+                                     src.path,
+                                     mb,
+                                     total_mb);
+                        }
+                        else
+                        {
+                            snprintf(status_message, 1023, "%s %s (downloaded %.2f MiB)",
+                                     lang_strings[STR_FAIL_DOWNLOAD_MSG],
+                                     src.path,
+                                     mb);
+                        }
                     }
                 }
                 return 0;
@@ -697,6 +788,11 @@ namespace Actions
             free(new_path);
         }
         return 1;
+    }
+
+    int Download(const DirEntry &src, const char *dest)
+    {
+        return DownloadWithClient(remoteclient, src, dest);
     }
 
     void DownloadFilesThread(void *argp)
@@ -709,19 +805,127 @@ namespace Actions
         else
             files.push_back(selected_remote_file);
 
-        for (std::vector<DirEntry>::iterator it = files.begin(); it != files.end(); ++it)
+        bool use_parallel_scheduler = false;
+        if (remoteclient != nullptr &&
+            remoteclient->clientType() == CLIENT_TYPE_WEBDAV &&
+            download_parallel_files > 1 &&
+            files.size() > 1 &&
+            overwrite_type != OVERWRITE_PROMPT)
         {
-            if (it->isDir)
+            use_parallel_scheduler = true;
+        }
+
+        if (!use_parallel_scheduler)
+        {
+            for (std::vector<DirEntry>::iterator it = files.begin(); it != files.end(); ++it)
             {
-                char new_dir[512];
-                sprintf(new_dir, "%s%s%s", local_directory, FS::hasEndSlash(local_directory) ? "" : "/", it->name);
-                Download(*it, new_dir);
-            }
-            else
-            {
-                Download(*it, local_directory);
+                if (stop_activity)
+                    break;
+
+                if (it->isDir)
+                {
+                    char new_dir[512];
+                    sprintf(new_dir, "%s%s%s", local_directory, FS::hasEndSlash(local_directory) ? "" : "/", it->name);
+                    Download(*it, new_dir);
+                }
+                else
+                {
+                    Download(*it, local_directory);
+                }
             }
         }
+        else
+        {
+            // Run downloads in small "waves" where one job stays attached
+            // to the main connection (keeping existing UI/confirm behaviour)
+            // and the remaining jobs in the wave use their own WebDAV
+            // clients in background threads.
+            RemoteSettings settings_copy = *remote_settings;
+            int max_parallel = download_parallel_files;
+            if (max_parallel < 2)
+                max_parallel = 2;
+            else if (max_parallel > 3)
+                max_parallel = 3;
+
+            size_t index = 0;
+            int failed_jobs = 0;
+
+            while (index < files.size() && !stop_activity)
+            {
+                size_t remaining = files.size() - index;
+                size_t wave_size = remaining < static_cast<size_t>(max_parallel) ? remaining : static_cast<size_t>(max_parallel);
+
+                // Leader job uses the primary connection for full UI integration.
+                DirEntry leader = files[index];
+                std::string leader_dest = BuildLocalDestForEntry(leader, local_directory);
+                index++;
+
+                size_t bg_count = (wave_size > 0) ? (wave_size - 1) : 0;
+                std::vector<ParallelDownloadWorkerCtx> worker_ctx(bg_count);
+                std::vector<Thread> threads(bg_count);
+
+                for (size_t i = 0; i < bg_count; ++i, ++index)
+                {
+                    worker_ctx[i].job.entry = files[index];
+                    worker_ctx[i].job.destBase = BuildLocalDestForEntry(files[index], local_directory);
+                    worker_ctx[i].settings = settings_copy;
+                    worker_ctx[i].result = 0;
+
+                    Result rc = threadCreate(&threads[i],
+                                             ParallelDownloadWorkerThread,
+                                             &worker_ctx[i],
+                                             nullptr,
+                                             0x100000,
+                                             0x3B,
+                                             -2);
+                    if (R_FAILED(rc))
+                    {
+                        threads[i].handle = 0;
+                        Logger::Logf("Parallel download: failed to create worker thread rc=0x%08x", rc);
+                        worker_ctx[i].result = 0;
+                        failed_jobs++;
+                    }
+                    else
+                    {
+                        threadStart(&threads[i]);
+                    }
+                }
+
+                // Run leader synchronously with the main client.
+                if (!stop_activity)
+                {
+                    if (leader.isDir)
+                    {
+                        Download(leader, leader_dest.c_str());
+                    }
+                    else
+                    {
+                        Download(leader, local_directory);
+                    }
+                }
+
+                // Wait for background jobs in this wave to finish.
+                for (size_t i = 0; i < bg_count; ++i)
+                {
+                    if (threads[i].handle != 0)
+                    {
+                        threadWaitForExit(&threads[i]);
+                        threadClose(&threads[i]);
+                    }
+                    if (worker_ctx[i].result <= 0)
+                        failed_jobs++;
+                }
+
+                if (stop_activity)
+                    break;
+            }
+
+            if (failed_jobs > 0 && !stop_activity)
+            {
+                snprintf(status_message, 1023, "%d transfer(s) failed – see log for details", failed_jobs);
+            }
+        }
+
         file_transfering = false;
         activity_inprogess = false;
         stop_activity = false;
@@ -746,6 +950,37 @@ namespace Actions
         {
             threadStart(&bk_activity_thid);
         }
+    }
+
+    static void ParallelDownloadWorkerThread(void *argp)
+    {
+        ParallelDownloadWorkerCtx *ctx = static_cast<ParallelDownloadWorkerCtx *>(argp);
+        if (!ctx)
+        {
+            threadExit();
+            return;
+        }
+
+        WebDAVClient *client = new WebDAVClient();
+        if (!client->Connect(ctx->settings.server, ctx->settings.username, ctx->settings.password))
+        {
+            const char *resp = client->LastResponse();
+            Logger::Logf("Parallel WebDAV connect failed server=%s resp=%s",
+                         ctx->settings.server,
+                         resp ? resp : "");
+            ctx->result = 0;
+            client->Quit();
+            delete client;
+            threadExit();
+            return;
+        }
+
+        int ret = DownloadWithClient(client, ctx->job.entry, ctx->job.destBase.c_str());
+        ctx->result = ret;
+
+        client->Quit();
+        delete client;
+        threadExit();
     }
 
     void KeepAliveThread(void *argp)

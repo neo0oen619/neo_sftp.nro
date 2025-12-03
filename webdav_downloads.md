@@ -118,7 +118,7 @@ Current tunables (in `config.ini`, section `[Global]`):
   - `webdav_chunk_mb=8` or `16`.
   - `webdav_parallel=4` or `6`.
 - Only push beyond that if you’re sure about SD and network stability.
-- Remember the code enforces a 256 MiB max in‑flight window (`chunk * parallel`). If you crank both, the chunk size will be automatically reduced.
+- Remember the code enforces a 256 MiB max in‑flight window (`webdav_chunk_mb * webdav_parallel`). If you crank both, the chunk size will be automatically reduced.
 
 #### Additional speed ideas (future work)
 
@@ -170,7 +170,7 @@ Current tunables (in `config.ini`, section `[Global]`):
   - If you really want to mark failed downloads, add metadata (e.g. a `.failed` marker file or a log entry) instead of renaming the data directory.
   - If you must rename, you should also rename it back to the deterministic `splitBase` naming convention before retrying.
 
-### Failure reporting & real size
+### Failure handling, auto‑retry & real size
 
 Current behaviour:
 
@@ -179,16 +179,13 @@ Current behaviour:
 - `bytes_to_download` typically retains the remote size (if known).
 - `bytes_transfered` reflects the actual local bytes written.
 
-To report “real size of failed file” cleanly in the UI, the next step would be:
+For WebDAV downloads dispatched through the main `remoteclient`, the app now:
 
-- In `DownloadFile`, on failure:
-  - Read the local size:
-    - For non‑split: `FS::GetSize(dest)`.
-    - For split: `GetSplitLocalSize(splitBase, partSize)` (requires computing the same `splitBase` used in `WebDAVClient::Get`).
-  - Update `status_message` to include that local size in a friendly format.
-  - Optionally, temporarily set `bytes_to_download = bytes_transfered` so the progress bar ends at 100% of what was *actually* downloaded instead of remote size.
+- Automatically retries a failed download up to 6 times with a short delay between attempts (20 s total per attempt, split into smaller sleeps so cancel stays responsive).
+- Only after those automatic retries are exhausted does it show the existing **Confirm** popup asking the user whether to resume or abort.
+- Leaves partial data on disk so a later retry can resume (split: based on parts in `<safe_name>.nsp/00, 01, …`; non‑split: based on the existing flat file size).
 
-This is not fully implemented yet to avoid surprising the user with “100%” on a failed transfer. If you build this, be explicit in messaging (e.g. “Failed after downloading X / Y MiB”).
+This keeps long queues from stalling on a single transient “Couldn’t connect to server” without changing the resume semantics or data layout.
 
 ### Program naming & UI text
 
