@@ -30,6 +30,7 @@ RemoteSettings *remote_settings;
 RemoteClient *remoteclient;
 std::vector<std::string> http_servers;
 std::vector<std::string> langs;
+bool logging_enabled = true;
 
 namespace CONFIG
 {
@@ -67,6 +68,10 @@ namespace CONFIG
 
         max_edit_file_size = ReadInt(CONFIG_GLOBAL, CONFIG_MAX_EDIT_FILE_SIZE, MAX_EDIT_FILE_SIZE);
         WriteInt(CONFIG_GLOBAL, CONFIG_MAX_EDIT_FILE_SIZE, max_edit_file_size);
+
+        // Logging toggle: when false, Logger::Log/Logf become no-ops.
+        logging_enabled = ReadBool(CONFIG_GLOBAL, CONFIG_LOGGING_ENABLED, true);
+        WriteBool(CONFIG_GLOBAL, CONFIG_LOGGING_ENABLED, logging_enabled);
 
         // WebDAV download chunk size in MiB for ranged GETs. Default to 8 MiB,
         // and clamp to a conservative range to avoid excessive memory usage.

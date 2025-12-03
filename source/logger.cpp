@@ -23,11 +23,15 @@ namespace
 
 void Logger::Init()
 {
+    if (!logging_enabled)
+        return;
     EnsureDir();
 }
 
 void Logger::Log(const std::string &msg)
 {
+    if (!logging_enabled)
+        return;
     EnsureDir();
     FILE *fd = FS::Append(LogPath());
     if (!fd)

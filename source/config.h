@@ -21,6 +21,7 @@
 
 #define CONFIG_DEFAULT_STYLE_NAME "Default"
 #define CONFIG_SWAP_XO "swap_xo"
+#define CONFIG_LOGGING_ENABLED "logging_enabled"
 #define CONFIG_MAX_EDIT_FILE_SIZE "max_edit_file_size"
 #define CONFIG_WEBDAV_CHUNK_MB "webdav_chunk_mb"
 #define CONFIG_WEBDAV_PARALLEL "webdav_parallel"
@@ -77,6 +78,7 @@ extern int max_edit_file_size;
 extern int webdav_chunk_size_mb;
 extern int webdav_parallel_connections;
 extern bool force_fat32;
+extern bool logging_enabled;
 
 namespace CONFIG
 {
